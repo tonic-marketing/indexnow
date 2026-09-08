@@ -1,0 +1,75 @@
+name: IndexNow auto-submit
+
+# Runs once a day and also gives you a manual "Run" button.
+on:
+  schedule:
+    - cron: '0 12 * * *'   # daily at 12:00 UTC (~8:00 AM Eastern)
+  workflow_dispatch: {}     # lets you run it on demand from the Actions tab
+
+jobs:
+  submit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Submit recently changed URLs to IndexNow
+        run: |
+          python3 - <<'PY'
+          import json, urllib.request, urllib.error
+          from datetime import datetime, timezone, timedelta
+          from xml.etree import ElementTree as ET
+
+          # ---- CONFIG (only edit here if the key or site ever changes) ----
+          HOST         = "www.tonic.ai"
+          KEY          = "39c25afc7bad42cf8f7ce3db0337a93f"
+          KEY_LOCATION = "https://www.tonic.ai/39c25afc7bad42cf8f7ce3db0337a93f.txt"
+          SITEMAP_URL  = "https://www.tonic.ai/sitemap.xml"
+          API          = "https://api.indexnow.org/IndexNow"
+          WINDOW_HOURS = 26   # submit pages whose lastmod is within this many hours
+          # -----------------------------------------------------------------
+
+          NS = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
+          UA = "Mozilla/5.0 (Tonic IndexNow automation)"
+
+          def fetch(url):
+              req = urllib.request.Request(url, headers={"User-Agent": UA})
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return r.read()
+
+          root = ET.fromstring(fetch(SITEMAP_URL))
+          cutoff = datetime.now(timezone.utc) - timedelta(hours=WINDOW_HOURS)
+
+          changed = []
+          for u in root.findall(f"{NS}url"):
+              loc = u.findtext(f"{NS}loc")
+              lastmod = u.findtext(f"{NS}lastmod")
+              if not loc or not lastmod:
+                  continue
+              try:
+                  dt = datetime.fromisoformat(lastmod.strip().replace("Z", "+00:00"))
+              except ValueError:
+                  continue
+              if dt >= cutoff:
+                  changed.append(loc.strip())
+
+          print(f"{len(changed)} page(s) changed in the last {WINDOW_HOURS}h.")
+          if not changed:
+              print("Nothing to submit today.")
+              raise SystemExit(0)
+
+          payload = json.dumps({
+              "host": HOST, "key": KEY,
+              "keyLocation": KEY_LOCATION, "urlList": changed,
+          }).encode("utf-8")
+          req = urllib.request.Request(
+              API, data=payload, method="POST",
+              headers={"Content-Type": "application/json; charset=utf-8", "User-Agent": UA},
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  print("IndexNow responded HTTP", r.status)
+          except urllib.error.HTTPError as e:
+              print("IndexNow responded HTTP", e.code, e.read().decode("utf-8", "replace"))
+              raise SystemExit(1)
+
+          for c in changed:
+              print("submitted:", c)
+          PY
